@@ -1,6 +1,9 @@
 import { LanguageModel, ModelMessage, streamText, Tool } from 'ai';
+import { detect, recordCall, recordResult, resetHistory } from './loop-detection';
+import { calculateDelay, isRetryable, sleep } from './retry';
 
 const MAX_STEPS = 15;
+const MAX_RETRIES = 3;
 
 export interface BudgetState {
   used: number;
@@ -15,41 +18,109 @@ export async function agentLoop(
   budget: BudgetState,
 ) {
   let step = 0;
+  resetHistory();
 
   while (step < MAX_STEPS) {
     step++;
     console.log(`\n--- Step ${step} ---`);
 
-    const { fullStream, response } = await streamText({
-      model,
-      system,
-      messages,
-      tools,
-      // 不设 stopWhen，每次只跑一步
-    });
-
     let hasToolCall = false;
     let fullText = '';
+    let shouldBreak = false;
+    let lastToolCall: { name: string; input: unknown } | null = null;
+    let stepResponse: Awaited<ReturnType<typeof streamText>['response']>;
+    let stepUsage: Awaited<ReturnType<typeof streamText>['usage']>;
 
-    for await (const part of fullStream) {
-      switch (part.type) {
-        case 'text-delta':
-          process.stdout.write(part.text);
-          fullText += part.text;
-          break;
-        case 'tool-call':
-          hasToolCall = true;
-          console.log(`\n 【调用工具: ${part.toolName}(${JSON.stringify(part.input)})】`);
-          break;
-        case 'tool-result':
-          console.log(`\n 【工具返回: ${JSON.stringify(part.output)}】`);
-          break;
+    // 步骤级重试：包裹整个 stream 消费过程
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const { fullStream, response, usage } = await streamText({
+          model,
+          system,
+          messages,
+          tools,
+          // 禁用 AI SDK 默认的自动重试
+          maxRetries: 0,
+          onError: () => {},
+          // 不设 stopWhen，每次只跑一步
+        });
+
+        for await (const part of fullStream) {
+          switch (part.type) {
+            case 'text-delta':
+              process.stdout.write(part.text);
+              fullText += part.text;
+              break;
+            case 'tool-call': {
+              hasToolCall = true;
+              lastToolCall = { name: part.toolName, input: part.input };
+              console.log(`\n 【调用工具: ${part.toolName}(${JSON.stringify(part.input)})】`);
+
+              const detection = detect(part.toolName, part.input);
+              if (detection.stuck) {
+                console.log(` ${detection.message}`);
+                if (detection.level === 'critical') {
+                  shouldBreak = true;
+                } else {
+                  messages.push({
+                    role: 'user' as const,
+                    content: `[系统提醒] ${detection.message}。请换一个思路解决问题，不要重复同样的操作。`,
+                  });
+                }
+              }
+              recordCall(part.toolName, part.input);
+              break;
+            }
+            case 'tool-result':
+              console.log(`\n 【工具返回: ${JSON.stringify(part.output)}】`);
+              if (lastToolCall) {
+                recordResult(lastToolCall.name, lastToolCall.input, part.output);
+              }
+              break;
+          }
+        }
+
+        stepResponse = await response;
+        stepUsage = await usage;
+        break;
+      } catch (error) {
+        if (attempt > MAX_RETRIES || !isRetryable(error as Error)) throw Error;
+        const delay = calculateDelay(attempt);
+        console.log(`【重试】 第 ${attempt}/${MAX_RETRIES} 次失败，${delay}ms 后重试...`);
+        await sleep(delay);
+        hasToolCall = false;
+        fullText = '';
+        shouldBreak = false;
+        lastToolCall = null;
       }
     }
 
+    if (shouldBreak) {
+      console.log('\n【循环检测触发，Agent 已停止】');
+      break;
+    }
+
     // 拿到这一步的完整结果，追加到消息历史
-    const stepMessages = await response;
-    messages.push(...stepMessages.messages);
+    messages.push(...stepResponse.messages);
+
+    // Token 预算追踪：budget 由调用方持有，跨轮持续累计
+    const inputTokensRaw = stepUsage?.inputTokens;
+    const inp =
+      typeof inputTokensRaw === 'number'
+        ? inputTokensRaw
+        : ((inputTokensRaw as { total?: number } | undefined)?.total ?? 0);
+    const outputTokensRaw = stepUsage?.outputTokens;
+    const out =
+      typeof outputTokensRaw === 'number'
+        ? outputTokensRaw
+        : ((outputTokensRaw as { total?: number } | undefined)?.total ?? 0);
+    budget.used += inp + out;
+    const pct = Math.round((budget.used / budget.limit) * 100);
+    console.log(`【Token】${budget.used}/${budget.limit}(${pct}%)`);
+    if (budget.used > budget.limit) {
+      console.log('\n【Token 预算耗尽，强制停止】');
+      break;
+    }
 
     // 退出条件：假如模型没有调用任何工具，说明它认为可以直接回复了
     if (!hasToolCall) {
@@ -61,5 +132,9 @@ export async function agentLoop(
 
     // 还有工具调用 -> 继续循环，让模型看到工具结果后继续思考
     console.log('  → 模型还在工作，继续下一步...');
+
+    if (step >= MAX_STEPS) {
+      console.log(`\n【达到最大步数，Agent 已停止】`);
+    }
   }
 }
