@@ -25,10 +25,6 @@ const rl = createInterface({
 
 const messages: ModelMessage[] = [];
 
-// const tools = {
-//   get_weather: weatherTool,
-//   calculator: calculatorTool,
-// };
 const registry = new ToolRegistry();
 registry.register(...allTools);
 
@@ -61,6 +57,5 @@ function ask() {
   });
 }
 
-console.log('Super Agent v0.3 — Fuses (type "exit" to quit)\n');
-console.log('试试输入："测试死循环"、"测试重试"、"测试预算" 看三层防护效果\n');
+console.log('Super Agent v0.4.1 — Fuses (type "exit" to quit)\n');
 ask();
