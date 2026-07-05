@@ -3,8 +3,9 @@ import { LanguageModel, ModelMessage } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createMockModel } from './mock-model.js';
 import { createInterface } from 'node:readline';
-import { calculatorTool, weatherTool } from './tools.js';
-import { agentLoop, BudgetState } from './agent-loop.js';
+import { allTools } from './tools.js';
+import { agentLoop } from './agent-loop.js';
+import { ToolRegistry } from './tool-registry.js';
 
 const deepseek = createOpenAI({
   baseURL: process.env.MODEL_BASE_URL,
@@ -24,15 +25,21 @@ const rl = createInterface({
 
 const messages: ModelMessage[] = [];
 
-const tools = {
-  get_weather: weatherTool,
-  calculator: calculatorTool,
-};
+// const tools = {
+//   get_weather: weatherTool,
+//   calculator: calculatorTool,
+// };
+const registry = new ToolRegistry();
+registry.register(...allTools);
 
-const budget: BudgetState = {
-  used: 0,
-  limit: 15000,
-};
+console.log(`已注册 ${registry.getAll().length} 个工具`);
+for (const tool of registry.getAll()) {
+  const flags = [
+    tool.isConcurrencySafe ? '可并发' : '串行',
+    tool.isReadOnly ? '只读' : '读写',
+  ].join(', ');
+  console.log(` - ${tool.name}(${flags})`);
+}
 
 function ask() {
   rl.question('\n You: ', async (input) => {
@@ -48,7 +55,7 @@ function ask() {
       content: trimmed,
     });
 
-    await agentLoop(model as LanguageModel, messages, tools, SYSTEM, budget);
+    await agentLoop(model as LanguageModel, messages, registry, SYSTEM);
 
     ask();
   });

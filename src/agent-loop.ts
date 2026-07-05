@@ -1,23 +1,20 @@
-import { LanguageModel, ModelMessage, streamText, Tool } from 'ai';
+import { LanguageModel, ModelMessage, streamText } from 'ai';
 import { detect, recordCall, recordResult, resetHistory } from './loop-detection';
 import { calculateDelay, isRetryable, sleep } from './retry';
+import { ToolRegistry } from './tool-registry';
 
 const MAX_STEPS = 15;
 const MAX_RETRIES = 3;
-
-export interface BudgetState {
-  used: number;
-  limit: number;
-}
+const TOKEN_BUDGET = 50000;
 
 export async function agentLoop(
   model: LanguageModel,
   messages: ModelMessage[],
-  tools: Record<string, Tool>,
+  registry: ToolRegistry,
   system: string,
-  budget: BudgetState,
 ) {
   let step = 0;
+  let totalTokens = 0;
   resetHistory();
 
   while (step < MAX_STEPS) {
@@ -28,8 +25,8 @@ export async function agentLoop(
     let fullText = '';
     let shouldBreak = false;
     let lastToolCall: { name: string; input: unknown } | null = null;
-    let stepResponse: Awaited<ReturnType<typeof streamText>['response']>;
-    let stepUsage: Awaited<ReturnType<typeof streamText>['usage']>;
+    let stepResponse: any;
+    let stepUsage: any;
 
     // 步骤级重试：包裹整个 stream 消费过程
     for (let attempt = 1; ; attempt++) {
@@ -38,10 +35,11 @@ export async function agentLoop(
           model,
           system,
           messages,
-          tools,
+          tools: registry.toAISDKFormat(),
           // 禁用 AI SDK 默认的自动重试
           maxRetries: 0,
           onError: () => {},
+          providerOptions: { openai: { parallelToolCalls: true } },
           // 不设 stopWhen，每次只跑一步
         });
 
@@ -71,12 +69,16 @@ export async function agentLoop(
               recordCall(part.toolName, part.input);
               break;
             }
-            case 'tool-result':
-              console.log(`\n 【工具返回: ${JSON.stringify(part.output)}】`);
+            case 'tool-result': {
+              const output =
+                typeof part.output === 'string' ? part.output : JSON.stringify(part.output);
+              const preview = output.length > 120 ? output.slice(0, 120) + '...' : output;
+              console.log(`\n 【结果: ${part.toolName}】${preview}`);
               if (lastToolCall) {
                 recordResult(lastToolCall.name, lastToolCall.input, part.output);
               }
               break;
+            }
           }
         }
 
@@ -104,21 +106,16 @@ export async function agentLoop(
     messages.push(...stepResponse.messages);
 
     // Token 预算追踪：budget 由调用方持有，跨轮持续累计
-    const inputTokensRaw = stepUsage?.inputTokens;
-    const inp =
-      typeof inputTokensRaw === 'number'
-        ? inputTokensRaw
-        : ((inputTokensRaw as { total?: number } | undefined)?.total ?? 0);
-    const outputTokensRaw = stepUsage?.outputTokens;
-    const out =
-      typeof outputTokensRaw === 'number'
-        ? outputTokensRaw
-        : ((outputTokensRaw as { total?: number } | undefined)?.total ?? 0);
-    budget.used += inp + out;
-    const pct = Math.round((budget.used / budget.limit) * 100);
-    console.log(`【Token】${budget.used}/${budget.limit}(${pct}%)`);
-    if (budget.used > budget.limit) {
-      console.log('\n【Token 预算耗尽，强制停止】');
+    const inp = stepUsage?.inputTokens?.total ?? stepUsage?.inputTokens ?? 0;
+    const out = stepUsage?.outputTokens?.total ?? stepUsage?.outputTokens ?? 0;
+    totalTokens += inp + out;
+    if (totalTokens > TOKEN_BUDGET * 0.9) {
+      console.log(
+        `[Token] ${totalTokens}/${TOKEN_BUDGET}(${Math.round((totalTokens / TOKEN_BUDGET) * 100)}%)`,
+      );
+    }
+    if (totalTokens > TOKEN_BUDGET) {
+      console.log(`\n[Token 预算耗尽]`);
       break;
     }
 
@@ -131,7 +128,7 @@ export async function agentLoop(
     }
 
     // 还有工具调用 -> 继续循环，让模型看到工具结果后继续思考
-    console.log('  → 模型还在工作，继续下一步...');
+    console.log('  \u2192 模型还在工作，继续下一步...');
 
     if (step >= MAX_STEPS) {
       console.log(`\n【达到最大步数，Agent 已停止】`);
