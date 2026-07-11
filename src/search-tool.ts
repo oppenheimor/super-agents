@@ -18,20 +18,22 @@ export const tavilySearchTool: ToolDefinition = {
   isReadOnly: true,
   maxResultChars: 3000,
   execute: async ({ query, max_results }: { query: string; max_results?: number }) => {
-    const apiKey = process.env.TAVILY_API_KEY;
+    const apiKey = process.env.TAVILY_API_KEY?.trim();
     if (!apiKey) {
       return '[web_search] 未配置 TAVILY_API_KEY，请在 .env 中设置';
     }
+    const token = apiKey.replace(/^Bearer\s+/i, '');
+    const authorization = `Bearer ${token}`;
 
     const res = await fetch('https://api.tavily.com/search', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        Authorization: authorization,
       },
       body: JSON.stringify({
-        apiKey,
         query,
-        maxResults: max_results,
+        max_results: max_results || 5,
         include_answer: true,
       }),
     });
@@ -98,8 +100,6 @@ export const serperSearchTool: ToolDefinition = {
 
     const data = (await res.json()) as any;
     const lines: string[] = [];
-
-    console.log('data ------', data);
 
     if (data.knowledgeGraph) {
       const kg = data.knowledgeGraph;
