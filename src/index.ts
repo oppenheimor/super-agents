@@ -7,12 +7,12 @@ import { allTools } from './tools.js';
 import { agentLoop } from './agent-loop.js';
 import { ToolRegistry } from './tool-registry.js';
 
-const deepseek = createOpenAI({
+const openai = createOpenAI({
   baseURL: process.env.MODEL_BASE_URL,
   apiKey: process.env.MODEL_API_KEY,
 });
 
-const model = process.env.MODEL_NAME ? deepseek.chat(process.env.MODEL_NAME!) : createMockModel();
+const model = process.env.MODEL_NAME ? openai.chat(process.env.MODEL_NAME!) : createMockModel();
 
 const SYSTEM = `你是 Super Agent，一个有工具调用能力的 AI 助手。
 需要查询信息时，主动使用工具，不要编造数据。

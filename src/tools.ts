@@ -4,6 +4,7 @@ import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from '
 import fg from 'fast-glob';
 import { execSync } from 'node:child_process';
 import { createServer, Server } from 'node:http';
+import { pickSearchTool, WebSearchTool } from './search-tool';
 
 export const weatherTool: ToolDefinition = {
   name: 'get_weather',
@@ -455,4 +456,6 @@ export const allTools: ToolDefinition[] = [
   bashTool,
   fetchUrlTool,
   startPreviewTool,
+  pickSearchTool(),
+  WebSearchTool,
 ];

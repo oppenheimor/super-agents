@@ -21,7 +21,8 @@
     "@ai-sdk/openai": "2.0.44",
     "ai": "5.0.98",
     "dotenv": "^17.4.2",
-    "fast-glob": "3.3.3"
+    "fast-glob": "3.3.3",
+    "turndown": "^7.2.4"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -33,6 +34,7 @@
     "prettier": "^3.9.4",
     "tsx": "^4.23.0",
     "typescript": "^6.0.3",
-    "typescript-eslint": "^8.62.1"
+    "typescript-eslint": "^8.62.1",
+    "@types/turndown": "^5.0.6"
   }
 }
