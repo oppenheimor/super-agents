@@ -18,6 +18,7 @@ import {
   sessionContext,
   toolGuide,
 } from './context/prompt-builder.js';
+import { estimateTokens, microcompact, summarize } from './context/compressor.js';
 
 const openai = createOpenAI({
   baseURL: process.env.MODEL_BASE_URL,
@@ -62,12 +63,33 @@ async function main() {
     console.log(`\n[Session] 新会话 "${sessionId}"`);
   }
 
-  //   const SYSTEM = `你是 Super Agent，一个有工具调用能力的 AI 助手。
-  // 需要查询信息时，主动使用工具，不要编造数据。
-  // 回答要简洁直接。
+  let summary = '';
+  // 压缩检测
+  const beforeTokens = estimateTokens(messages);
+  console.log(`\n[压缩前] ${messages.length} 条消息, ~${beforeTokens} tokens`);
 
-  // ${registry.getDeferredToolSummary()}
-  // `;
+  // Layer 1: Microcompact
+  const mc = microcompact(messages);
+  messages = mc.messages;
+  const afterMCTokens = estimateTokens(messages);
+  console.log(`[Layer 1: Microcompact] 清理了 ${mc.cleared} 个工具结果, ~${afterMCTokens} tokens`);
+
+  // Layer 2: LLM Summarization
+  const compResult = await summarize(model as LanguageModel, messages, summary);
+  messages = compResult.messages;
+  summary = compResult.summary;
+  const afterSumTokens = estimateTokens(messages);
+  if (compResult.compressedCount > 0) {
+    console.log(
+      `[Layer 2: Summarization] 压缩了 ${compResult.compressedCount} 条消息, ~${afterSumTokens} tokens`,
+    );
+    console.log(`[摘要预览] ${summary.slice(0, 150)}...`);
+  } else {
+    console.log(`[Layer 2: Summarization] 未触发（消息量不够）`);
+  }
+
+  console.log(`[压缩后] ${messages.length} 条消息, ~${afterSumTokens} tokens`);
+
   // Prompt pipe 组装 System Prompt
   const builder = new PromptBuilder()
     .pipe('coreRules', CoreRules())
@@ -83,9 +105,6 @@ async function main() {
   };
 
   const SYSTEM = builder.build(promptCtx);
-
-  console.log(`\n=== System Prompt ===`);
-  console.log(SYSTEM);
 
   // Debug: 显示 Prompt Pipe 各模块状态
   builder.debug(promptCtx);
@@ -130,6 +149,26 @@ async function main() {
       // 持久化本轮新增的消息（agent loop 会往 messages 里 push assistant/tool 消息）
       const newMessages = messages.slice(beforeLen);
       store.appendAll(newMessages);
+
+      // 检查每轮过后是否需要压缩
+      console.log(`messages:`);
+      console.log(messages);
+      const currentTokens = estimateTokens(messages);
+      if (currentTokens > 4000) {
+        console.log(`\n  [压缩检查] ~${currentTokens} tokens, 触发压缩...`);
+        const mc2 = microcompact(messages);
+        messages = mc2.messages;
+        if (mc2.cleared > 0) console.log(` [Microcompact] 清理了 ${mc2.cleared} 个工具结果`);
+
+        const comp2 = await summarize(model as LanguageModel, messages, summary);
+        if (comp2.compressedCount > 0) {
+          messages = comp2.messages;
+          summary = comp2.summary;
+          console.log(
+            `  [Summarization] 压缩了 ${comp2.compressedCount} 条消息, ~${estimateTokens(messages)} tokens`,
+          );
+        }
+      }
 
       ask();
     });
