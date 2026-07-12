@@ -9,6 +9,15 @@ import { ToolRegistry } from './tools/registry.js';
 import { registerSimulatedTools } from './mock-mcp-tools.js';
 import { getToolSearchTool } from './tools/tool-search-tool.js';
 import { connectMCP } from './tools/connect-mcp.js';
+import { SessionStore } from './session/store.js';
+import {
+  CoreRules,
+  deferredTools,
+  PromptBuilder,
+  PromptContext,
+  sessionContext,
+  toolGuide,
+} from './context/prompt-builder.js';
 
 const openai = createOpenAI({
   baseURL: process.env.MODEL_BASE_URL,
@@ -40,14 +49,46 @@ async function main() {
   const simCount = registerSimulatedTools(registry);
   console.log(`  已注册 ${simCount} 个模拟 MCP 工具`);
 
-  const messages: ModelMessage[] = [];
+  // Session 持久化
+  const isContinue = process.argv.includes('--continue');
+  const sessionId = 'default';
+  const store = new SessionStore(sessionId);
 
-  const SYSTEM = `你是 Super Agent，一个有工具调用能力的 AI 助手。
-需要查询信息时，主动使用工具，不要编造数据。
-回答要简洁直接。
+  let messages: ModelMessage[] = [];
+  if (isContinue && store.exists()) {
+    messages = store.load();
+    console.log(`\n[Session] 恢复会话 "${sessionId}"，${messages.length} 条历史消息`);
+  } else {
+    console.log(`\n[Session] 新会话 "${sessionId}"`);
+  }
 
-${registry.getDeferredToolSummary()}
-  `;
+  //   const SYSTEM = `你是 Super Agent，一个有工具调用能力的 AI 助手。
+  // 需要查询信息时，主动使用工具，不要编造数据。
+  // 回答要简洁直接。
+
+  // ${registry.getDeferredToolSummary()}
+  // `;
+  // Prompt pipe 组装 System Prompt
+  const builder = new PromptBuilder()
+    .pipe('coreRules', CoreRules())
+    .pipe('toolGuide', toolGuide())
+    .pipe('deferredTools', deferredTools())
+    .pipe('sessionContext', sessionContext());
+
+  const promptCtx: PromptContext = {
+    toolCount: registry.getActiveTools().length,
+    deferredToolSummary: registry.getDeferredToolSummary(),
+    sessionMessageCount: messages.length,
+    sessionId,
+  };
+
+  const SYSTEM = builder.build(promptCtx);
+
+  console.log(`\n=== System Prompt ===`);
+  console.log(SYSTEM);
+
+  // Debug: 显示 Prompt Pipe 各模块状态
+  builder.debug(promptCtx);
 
   // 估算 token
   const allCount = registry.getAll().length;
@@ -76,12 +117,20 @@ ${registry.getDeferredToolSummary()}
         return;
       }
 
-      messages.push({
+      const userMsg: ModelMessage = {
         role: 'user',
         content: trimmed,
-      });
+      };
+      messages.push(userMsg);
+      store.append(userMsg);
 
+      const beforeLen = messages.length;
       await agentLoop(model as LanguageModel, messages, registry, SYSTEM);
+
+      // 持久化本轮新增的消息（agent loop 会往 messages 里 push assistant/tool 消息）
+      const newMessages = messages.slice(beforeLen);
+      store.appendAll(newMessages);
+
       ask();
     });
   }
