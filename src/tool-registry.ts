@@ -1,4 +1,4 @@
-import { jsonSchema } from 'ai';
+import { jsonSchema, Tool } from 'ai';
 import { MCPClient } from './mcp-client';
 
 export interface ToolDefinition {
@@ -8,6 +8,10 @@ export interface ToolDefinition {
   isConcurrencySafe?: boolean;
   isReadOnly?: boolean;
   maxResultChars?: number;
+  // 是否延迟加载
+  shouldDefer?: boolean;
+  // 搜索提示词，帮助 ToolSearch 匹配
+  searchHint?: string;
   execute: (input: any) => Promise<unknown>;
 }
 
@@ -21,6 +25,8 @@ export class ToolRegistry {
   private exclusiveLock = false; // 当前是否有独占锁持有者
   private concurrentCount = 0; // 当前共享锁持有数
   private waitQueue: Array<() => void> = []; // 阻塞等待中的 resolve 函数
+
+  private discoveredTools: Set<string> = new Set();
 
   register(...tools: ToolDefinition[]): void {
     for (const tool of tools) {
@@ -50,6 +56,8 @@ export class ToolRegistry {
         isConcurrencySafe: true,
         isReadOnly: true,
         maxResultChars: 3000,
+        shouldDefer: true,
+        searchHint: `${serverName} ${tool.name} ${tool.description}`,
         execute: async (input: any) => {
           return client.callTool(originalName, input);
         },
@@ -61,7 +69,12 @@ export class ToolRegistry {
     return registered;
   }
 
-  async closeAllMCP() {}
+  async closeAllMCP(): Promise<void> {
+    for (const client of this.mcpClients) {
+      await client.close();
+    }
+    this.mcpClients = [];
+  }
 
   get(name: string): ToolDefinition | undefined {
     return this.tools.get(name);
@@ -69,6 +82,55 @@ export class ToolRegistry {
 
   getAll(): ToolDefinition[] {
     return Array.from(this.tools.values());
+  }
+
+  searchTools(query: string): ToolDefinition[] {
+    const q = query.trim().toLowerCase();
+    const results: ToolDefinition[] = [];
+
+    const names = q.includes(',')
+      ? q
+          .split(',')
+          .map((n) => n.trim())
+          .filter(Boolean)
+      : [q];
+
+    for (const name of names) {
+      const tool = this.tools.get(name);
+      if (tool && tool.name !== 'tool_search') {
+        results.push(tool);
+        this.discoveredTools.add(tool.name);
+      }
+    }
+
+    return results;
+  }
+
+  getActiveTools(): ToolDefinition[] {
+    return this.getAll().filter((tool) => {
+      if (tool.shouldDefer && !this.discoveredTools.has(tool.name)) {
+        return false;
+      }
+
+      return true;
+    });
+  }
+
+  getDeferredToolSummary(): string {
+    const deferred = this.getAll().filter(
+      (tool) => tool.shouldDefer && !this.discoveredTools.has(tool.name),
+    );
+
+    if (deferred.length === 0) {
+      return '';
+    }
+
+    const lines = deferred.map((t) => {
+      const hint = t.searchHint ? `- ${t.searchHint}` : '';
+      return ` - ${t.name}${hint}`;
+    });
+
+    return `\n以下工具可用， 但需要先通过 tool_search 搜索获取完整定义：\n${lines.join('\n')}`;
   }
 
   // 获取共享锁：只要没人独占就能拿，多个只读工具可以同时持有
@@ -109,21 +171,21 @@ export class ToolRegistry {
 
   toAISDKFormat(): Record<string, any> {
     const result: Record<string, any> = {};
-    for (const [name, tool] of this.tools) {
+    for (const tool of this.getActiveTools()) {
       const maxChars = tool.maxResultChars;
       const executeFn = tool.execute;
       const isSafe = tool.isConcurrencySafe === true;
-      result[name] = {
+      result[tool.name] = {
         description: tool.description,
         inputSchema: jsonSchema(tool.parameters),
         execute: async (input: any) => {
           // 在真正执行前先按 isConcurrencySafe 获取锁
           if (isSafe) {
             await this.acquireConcurrent();
-            console.log(` [并发] ${name} 获取共享锁`);
+            console.log(` [并发] ${tool.name} 获取共享锁`);
           } else {
             await this.acquireExclusive();
-            console.log(` [串行] ${name} 获取独占锁，等待其他工具完成`);
+            console.log(` [串行] ${tool.name} 获取独占锁，等待其他工具完成`);
           }
           try {
             const raw = await executeFn(input);
@@ -142,6 +204,34 @@ export class ToolRegistry {
     }
 
     return result;
+  }
+
+  // 估算 token
+  countTokenEstimate(): { active: number; deferred: number; total: number } {
+    let active = 0;
+    let deferred = 0;
+
+    for (const tool of this.tools.values()) {
+      const schemaSize = JSON.stringify({
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters,
+      }).length;
+
+      const tokens = Math.ceil(schemaSize / 4);
+
+      if (tool.shouldDefer && !this.discoveredTools.has(tool.name)) {
+        deferred += tokens;
+      } else {
+        active += tokens;
+      }
+    }
+
+    return {
+      active,
+      deferred,
+      total: active + deferred,
+    };
   }
 }
 
