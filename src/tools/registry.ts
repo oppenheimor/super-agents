@@ -1,4 +1,4 @@
-import { jsonSchema, Tool } from 'ai';
+import { jsonSchema } from 'ai';
 import { MCPClient } from './mcp-client';
 
 export interface ToolDefinition {

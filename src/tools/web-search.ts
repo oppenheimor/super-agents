@@ -1,5 +1,5 @@
-import { ToolDefinition } from './tool-registry';
 import TurndownService from 'turndown';
+import { ToolDefinition } from './registry';
 
 // ── Tavily（自动挡）──────────────────────────────
 
@@ -123,7 +123,7 @@ export const serperSearchTool: ToolDefinition = {
 
 // ── Web Fetch（手动挡配套）──────────────────────────────
 
-export const WebSearchTool: ToolDefinition = {
+export const webFetchTool: ToolDefinition = {
   name: 'web_fetch',
   description:
     '抓取指定 URL 的网页内容，转换为 Markdown 格式。搭配 web_search 使用——先搜索拿到链接，再用这个工具读取详细内容',
